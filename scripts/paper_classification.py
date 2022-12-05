@@ -5,3 +5,4 @@ zip_file = keras.utils.get_file(fname='cora.tgz',
                                 extract=True,
                                 )
 data_dir = os.path.join(os.path.dirname(zip_file), "cora")
+#test
