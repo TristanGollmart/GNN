@@ -79,6 +79,7 @@ print("edge weights shape:", edge_weights.shape)
 
 # merge into tuple containing all relevant information about graph:
 graph_info = (node_features, edges, edge_weights)
+num_classes = class_names.shape[0]
 
 # -----------Build GNN-----------
 hidden_units = [32, 32]
@@ -94,7 +95,7 @@ def create_ffn(hidden_units, dropout_rate, name=None):
     for unit in hidden_units:
         fnn_layers.append(layers.BatchNormalization())
         fnn_layers.append(layers.Dropout(dropout_rate))
-        fnn_layers.append(layers.Dense(units,activation=tf.nn.gelu))
+        fnn_layers.append(layers.Dense(units, activation=tf.nn.gelu))
     return keras.Sequential(fnn_layers, name=name)
 
 class GraphConvLayer(layers.Layer)
@@ -130,6 +131,7 @@ class GraphConvLayer(layers.Layer)
     def prepare(self, node_representations, weights=None):
         # node representations shape is [num_edges, embedding_dim]
         messages = self.ffn_prepare(node_representations)
+        # use to mask messages of all neighbours using edge_eights as binary weights
         if weights is not None:
             messages = messages * tf.expand_dims(weights, -1)
         return messages
@@ -174,7 +176,106 @@ class GraphConvLayer(layers.Layer)
         if self.combination_type == "gru":
             node_embeddings = tf.unstack(node_embeddings, axis=1)[-1]
 
-gnn_model = GNNNodeClassifier()
+        if self.normalize:
+            node_embeddings = tf.nn.l2_normalize(node_embeddings, axis=-1)
+        return node_embeddings
 
+    def call(self, inputs):
+        '''
+        process inputs via aggregating messages
+        and parsing it to a FNN to produce node embeddings
+        :param inputs: tuple of three elements: node representations, edges, edge_weigts
+        :return: node_embeddings of shape [num_nodes, representation_dim]
+        '''
+        node_representations, edges, edge_weights = inputs
+        # get node indices (source) and neighbour_indices (target) from edges
+        node_indices, neighbour_indices = edges[0], edges[1]
+        # neighbour representation shape is [num_edges, representation_dim]
+        neighbour_representations = tf.gather(node_representations, neighbour_indices)
+
+        # prepare the messages of the neighbours
+        neighbour_messages = self.prepare(neighbour_representations, edge_weights)
+
+        # aggregate the neighbours messages
+        aggregated_messages = self.aggregate(
+            node_indices, neighbour_messages, node_representations)
+
+        # update the node embedding using the neighbour messages
+        return self.update(node_representations,aggregated_messages)
+
+class GNNNodeClassifier(tf.keras.Model):
+    def __init__(
+            self,
+            graph_info,
+            num_classes,
+            hidden_units,
+            aggregation_type="sum",
+            combination_type="concat",
+            dropout_rate=0.2,
+            normalize=True,
+            *args,
+            **kwargs,
+    ):
+
+        super(GNNNodeClassifier, self).__init__(*args, **kwargs)
+
+        # unpack graph_info
+        node_features, edges, edge_weights = graph_info
+        self.node_features = node_features
+        self.edges = edges
+        self.edge_weights = edge_weights
+        if edge_weights is None:
+            self.edge_weights = tf.ones(shape=edges.shape[1])
+        # scaling
+        self.edge_weights = self.edge_weights / (tf.math.reduce_sum(self.edge_weights))
+
+        # create pre-process layer
+        self.preprocess = create_ffn(hidden_units, dropout_rate, name="preprocess")
+        # create first graph conv layer
+        self.conv1 = GraphConvLayer(
+            hidden_units,
+            dropout_rate,
+            aggregation_type,
+            combination_type,
+            normalize,
+            name="graph_conv1",
+        )
+        # create second gcn
+
+        self.conv2 = GraphConvLayer(
+            hidden_units,
+            dropout_rate,
+            aggregation_type,
+            combination_type,
+            normalize,
+            name="graph_conv2"
+        )
+        # post processing layer
+        self.postprocess = create_ffn(hidden_units, dropout_rate, name="postprocess")
+        # compute logits layer
+        self.compute_logits = layers.Dense(units=num_classes)
+
+    def call(self, input_node_indices):
+        x = self.preprocess(self.node_features)
+        x1 = self.conv1((x, self.edges, self.edge_weights))
+         # skip connection
+        x = x1 + x
+        x2 = self.conv2((x, self.edges, self.edge_weights))
+        x = x2 + x
+        #post processing
+        x = self.postprocess(x)
+        # Fetch node embeddings from x with queried input indices
+        node_embeddings = tf.gather(x, input_node_indices)
+        return self.compute_logits(node_embeddings)
+
+gnn_model = GNNNodeClassifier(
+    graph_info=graph_info,
+    num_classes=num_classes,
+    hidden_units=hidden_units,
+    dropout_rate=dropout_rate,
+    name="gnn_model",
+)
+
+print("GNN output shape:", gnn_model([1, 10, 100]))
 
 print("finished")
