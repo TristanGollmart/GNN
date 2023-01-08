@@ -1,6 +1,7 @@
 from tensorflow import keras
 import os
 import pandas as pd
+import numpy as np
 
 # get data
 if not os.path.exists("data\\cora.cites"):
@@ -71,7 +72,7 @@ print("Edges shape:", edges.shape)
 
 # important: Set fixed order first: by paper-id from min to max
 node_features = papers_data.sort_values("paper_id")[feature_names]
-node_features = tf.cast(node_features.to_numpy(),dtype=tf.dtypes.float64)
+node_features = tf.cast(node_features.to_numpy(), dtype=tf.dtypes.float64)
 
 # edge weights: set equal to 1 for each edge
 edge_weights = tf.ones(shape=edges.shape[1])
@@ -79,26 +80,23 @@ print("edge weights shape:", edge_weights.shape)
 
 # merge into tuple containing all relevant information about graph:
 graph_info = (node_features, edges, edge_weights)
-num_classes = class_names.shape[0]
+num_classes = len(class_names)
+num_features = len(feature_names)
+
 
 # -----------Build GNN-----------
-hidden_units = [32, 32]
-learning_rate = 0.01
-dropout_rate = 0.5
-num_epochs = 300
-batch_size = 256
 
 def create_ffn(hidden_units, dropout_rate, name=None):
     # returns sequential moddel, with number of hidden layers = len(hidden_units)
     # with the specified number of hidden_units
     fnn_layers = []
-    for unit in hidden_units:
+    for units in hidden_units:
         fnn_layers.append(layers.BatchNormalization())
         fnn_layers.append(layers.Dropout(dropout_rate))
         fnn_layers.append(layers.Dense(units, activation=tf.nn.gelu))
     return keras.Sequential(fnn_layers, name=name)
 
-class GraphConvLayer(layers.Layer)
+class GraphConvLayer(layers.Layer):
     def __init__(self,
                  hidden_units,
                  dropout_rate=0.2,
@@ -277,5 +275,46 @@ gnn_model = GNNNodeClassifier(
 )
 
 print("GNN output shape:", gnn_model([1, 10, 100]))
+gnn_model.summary()
+
+# Training
+hidden_units = [32, 32]
+learning_rate = 0.01
+dropout_rate = 0.5
+num_epochs = 300
+batch_size = 256
+
+train_data, test_data = [], []
+# allocate around 50% of each class to training
+for _, group_data in papers_data.groupby("subject"):
+    rand_selection = np.random.rand(len(group_data.index)) <= 0.5
+    train_data.append(group_data[rand_selection])
+    test_data.append(group_data[~rand_selection])
+
+train_data = pd.concat(train_data)
+test_data = pd.concat(test_data)
+
+def run_experimend(model, x_train, y_train):
+    # given a model and data run the pipeline from comiling the model with relevant parameters to fitting model
+    model.compile(
+        optimizer = keras.optimizers.Adam(learning_rate),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[keras.metrics.SparseCategoricalAccuracy(name="acc")]
+    )
+    # early stopping callback
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor="val_acc", patience=50, restore_best_weights=True
+    )
+    #Fitting
+    history = model.fit(
+        x=x_train,
+        y=y_train,
+        epochs=num_epochs,
+        batch_size=batch_size,
+        validation_split=0.15,
+        callbacks=[early_stopping],
+    )
+    return history
+
 
 print("finished")
