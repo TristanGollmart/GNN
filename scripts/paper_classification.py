@@ -82,8 +82,75 @@ print("edge weights shape:", edge_weights.shape)
 graph_info = (node_features, edges, edge_weights)
 num_classes = len(class_names)
 num_features = len(feature_names)
+train_data, test_data = [], []
+# allocate around 50% of each class to training
+for _, group_data in papers_data.groupby("subject"):
+    rand_selection = np.random.rand(len(group_data.index)) <= 0.5
+    train_data.append(group_data[rand_selection])
+    test_data.append(group_data[~rand_selection])
 
+train_data = pd.concat(train_data)
+test_data = pd.concat(test_data)
 
+x_train = train_data[feature_names].to_numpy()
+y_train = train_data["subject"].to_numpy()
+x_test = test_data[feature_names].to_numpy()
+y_test = test_data["subject"].to_numpy()
+
+# x_train = train_data.paper_id.to_numpy()
+
+def run_experiment(model, x_train, y_train):
+    # given a model and data run the pipeline from comiling the model with relevant parameters to fitting model
+    model.compile(
+        optimizer = keras.optimizers.Adam(learning_rate),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[keras.metrics.SparseCategoricalAccuracy(name="acc")]
+    )
+    # early stopping callback
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor="val_acc", patience=50, restore_best_weights=True
+    )
+    #Fitting
+    history = model.fit(
+        x=x_train,
+        y=y_train,
+        epochs=num_epochs,
+        batch_size=batch_size,
+        validation_split=0.15,
+        callbacks=[early_stopping],
+    )
+    return history
+
+def display_class_probabilities(probabilities):
+    for instance_idx, probs in enumerate(probabilities):
+        print(f"instance {instance_idx + 1}:")
+        for class_idx, prob in enumerate(probs):
+            print(f" - {class_values[class_idx]}: {round(prob * 100, 2)}%")
+
+def display_learning_curve(history):
+    fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+    ax[0].plot(history.history["loss"])
+    ax[0].plot(history.history["val_loss"])
+    ax[0].legend(["trainloss", "validation loss"])
+    ax[0].set_xlabels("epochs")
+    ax[0].set_ylabels("loss")
+    ax[1].plot(history.history["acc"])
+    ax[1].plot(history.history["val_acc"])
+    ax[1].legend(["train acc", "validation acc"])
+    ax[1].set_xlabels("epochs")
+    ax[1].set_ylabels("acc")
+    plt.show()
+
+def generate_random_instances(num_instances):
+    token_probability = x_train.mean(axis=0)
+    instances = []
+    for _ in range(num_instances):
+        probabilities = np.random.uniform(size=len(token_probability))
+        instance = (probabilities < token_probability).astype(int)
+        instances.append(instance)
+    return instances
+
+new_instances = generate_random_instances()
 # -----------Build GNN-----------
 
 def create_ffn(hidden_units, dropout_rate, name=None):
@@ -284,37 +351,15 @@ dropout_rate = 0.5
 num_epochs = 300
 batch_size = 256
 
-train_data, test_data = [], []
-# allocate around 50% of each class to training
-for _, group_data in papers_data.groupby("subject"):
-    rand_selection = np.random.rand(len(group_data.index)) <= 0.5
-    train_data.append(group_data[rand_selection])
-    test_data.append(group_data[~rand_selection])
+# define new train data for GNN
+x_train = train_data.paper_id.to_numpy()
+history = run_experiment(gnn_model, x_train, y_train)
 
-train_data = pd.concat(train_data)
-test_data = pd.concat(test_data)
+display_learning_curve(history)
 
-def run_experimend(model, x_train, y_train):
-    # given a model and data run the pipeline from comiling the model with relevant parameters to fitting model
-    model.compile(
-        optimizer = keras.optimizers.Adam(learning_rate),
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=[keras.metrics.SparseCategoricalAccuracy(name="acc")]
-    )
-    # early stopping callback
-    early_stopping = keras.callbacks.EarlyStopping(
-        monitor="val_acc", patience=50, restore_best_weights=True
-    )
-    #Fitting
-    history = model.fit(
-        x=x_train,
-        y=y_train,
-        epochs=num_epochs,
-        batch_size=batch_size,
-        validation_split=0.15,
-        callbacks=[early_stopping],
-    )
-    return history
-
+# evaluate trained model predictions on test set
+x_test = test_data.paper_id.to_numpy()
+_, test_accurace = gnn_model.evaluate(x=x_test, y=y_test, verbose=0)
+print(f"Test accuracy: {round(test_accurace, 2)}%")
 
 print("finished")
