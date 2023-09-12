@@ -53,7 +53,7 @@ colors = papers_data["subject"].tolist()
 cora_graph = nx.from_pandas_edgelist(citations_data.sample(n=1500))
 node_subjects = list(cora_graph.nodes)
 subjects = list(papers_data[papers_data["paper_id"].isin(node_subjects)]["subject"])
-nx.draw_spring(cora_graph, node_size=15,node_color=subjects)
+nx.draw_spring(cora_graph, node_size=15, node_color=subjects)
 plt.legend()
 plt.show()
 
@@ -97,12 +97,18 @@ y_train = train_data["subject"].to_numpy()
 x_test = test_data[feature_names].to_numpy()
 y_test = test_data["subject"].to_numpy()
 
-# x_train = train_data.paper_id.to_numpy()
+hidden_units = [32, 32]
+learning_rate = 0.01
+dropout_rate = 0.5
+num_epochs = 300
+batch_size = 256
+
+# Help Functions
 
 def run_experiment(model, x_train, y_train):
-    # given a model and data run the pipeline from comiling the model with relevant parameters to fitting model
+    # given a model and data run the pipeline from compiling the model with relevant parameters to fitting model
     model.compile(
-        optimizer = keras.optimizers.Adam(learning_rate),
+        optimizer=keras.optimizers.Adam(learning_rate),
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=[keras.metrics.SparseCategoricalAccuracy(name="acc")]
     )
@@ -110,13 +116,14 @@ def run_experiment(model, x_train, y_train):
     early_stopping = keras.callbacks.EarlyStopping(
         monitor="val_acc", patience=50, restore_best_weights=True
     )
-    #Fitting
+    # Fitting
     history = model.fit(
         x=x_train,
         y=y_train,
         epochs=num_epochs,
         batch_size=batch_size,
-        validation_split=0.15,
+        validation_data=(x_test, y_test),
+        # validation_split=0.15,
         callbacks=[early_stopping],
     )
     return history
@@ -132,26 +139,15 @@ def display_learning_curve(history):
     ax[0].plot(history.history["loss"])
     ax[0].plot(history.history["val_loss"])
     ax[0].legend(["trainloss", "validation loss"])
-    ax[0].set_xlabels("epochs")
-    ax[0].set_ylabels("loss")
+    ax[0].set_xlabel("epochs")
+    ax[0].set_ylabel("loss")
     ax[1].plot(history.history["acc"])
     ax[1].plot(history.history["val_acc"])
     ax[1].legend(["train acc", "validation acc"])
-    ax[1].set_xlabels("epochs")
-    ax[1].set_ylabels("acc")
+    ax[1].set_xlabel("epochs")
+    ax[1].set_ylabel("acc")
     plt.show()
 
-def generate_random_instances(num_instances):
-    token_probability = x_train.mean(axis=0)
-    instances = []
-    for _ in range(num_instances):
-        probabilities = np.random.uniform(size=len(token_probability))
-        instance = (probabilities < token_probability).astype(int)
-        instances.append(instance)
-    return instances
-
-new_instances = generate_random_instances()
-# -----------Build GNN-----------
 
 def create_ffn(hidden_units, dropout_rate, name=None):
     # returns sequential moddel, with number of hidden layers = len(hidden_units)
@@ -162,6 +158,36 @@ def create_ffn(hidden_units, dropout_rate, name=None):
         fnn_layers.append(layers.Dropout(dropout_rate))
         fnn_layers.append(layers.Dense(units, activation=tf.nn.gelu))
     return keras.Sequential(fnn_layers, name=name)
+
+
+def create_baseline_model(hidden_units, num_classes, dropout_rate=0.2):
+    inputs = layers.Input(shape=(num_features,), name='input_features')
+    x = create_ffn(hidden_units, dropout_rate, name=f'ffn_block1')(inputs)
+    for block_idx in range(4):
+        x1 = create_ffn(hidden_units, dropout_rate, name=f'ffn_block{block_idx+2}')(x)
+        x = layers.Add(name=f'skip_connection{block_idx+2}')([x, x1])
+    logits = layers.Dense(num_classes, name='logits')(x)
+    return keras.Model(inputs=inputs, outputs=logits, name='baseline')
+
+baseline_model = create_baseline_model(hidden_units, num_classes, dropout_rate)
+baseline_model.summary()
+history = run_experiment(baseline_model, x_train, y_train)
+display_learning_curve(history)
+
+
+''' only for baseline model that does not account for edge information
+def generate_random_instances(num_instances):
+    token_probability = x_train.mean(axis=0)
+    instances = []
+    for _ in range(num_instances):
+        probabilities = np.random.uniform(size=len(token_probability))
+        instance = (probabilities < token_probability).astype(int)
+        instances.append(instance)
+    return instances
+new_instances = generate_random_instances(100)
+'''
+
+# -----------Build GNN-----------
 
 class GraphConvLayer(layers.Layer):
     def __init__(self,
@@ -266,7 +292,8 @@ class GraphConvLayer(layers.Layer):
             node_indices, neighbour_messages, node_representations)
 
         # update the node embedding using the neighbour messages
-        return self.update(node_representations,aggregated_messages)
+        return self.update(node_representations, aggregated_messages)
+
 
 class GNNNodeClassifier(tf.keras.Model):
     def __init__(
@@ -333,6 +360,8 @@ class GNNNodeClassifier(tf.keras.Model):
         node_embeddings = tf.gather(x, input_node_indices)
         return self.compute_logits(node_embeddings)
 
+# Training
+
 gnn_model = GNNNodeClassifier(
     graph_info=graph_info,
     num_classes=num_classes,
@@ -344,21 +373,15 @@ gnn_model = GNNNodeClassifier(
 print("GNN output shape:", gnn_model([1, 10, 100]))
 gnn_model.summary()
 
-# Training
-hidden_units = [32, 32]
-learning_rate = 0.01
-dropout_rate = 0.5
-num_epochs = 300
-batch_size = 256
-
 # define new train data for GNN
 x_train = train_data.paper_id.to_numpy()
+x_test = test_data.paper_id.to_numpy()
 history = run_experiment(gnn_model, x_train, y_train)
 
 display_learning_curve(history)
 
 # evaluate trained model predictions on test set
-x_test = test_data.paper_id.to_numpy()
+
 _, test_accurace = gnn_model.evaluate(x=x_test, y=y_test, verbose=0)
 print(f"Test accuracy: {round(test_accurace, 2)}%")
 
